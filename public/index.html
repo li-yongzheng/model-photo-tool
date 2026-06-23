@@ -396,15 +396,17 @@ uploadZone.addEventListener("drop", (e) => {
 function handleFiles(files) {
   const images = files.filter(f => f.type.match(/^image\/(jpeg|png|webp)$/));
   if (!images.length) { toast("请选择 JPG、PNG 或 WEBP 格式的图片", true); return; }
-  if (images.length > MAX_IMAGES) {
-    toast(`最多只能上传 ${MAX_IMAGES} 张图片，只保留前 ${MAX_IMAGES} 张`, true);
-    images.splice(MAX_IMAGES);
-  }
 
-  selectedFiles = images;
+  // Append new images to existing selection
+  const combined = [...selectedFiles, ...images];
+  if (combined.length > MAX_IMAGES) {
+    toast(`最多 ${MAX_IMAGES} 张，已保留前 ${MAX_IMAGES} 张`, true);
+    combined.splice(MAX_IMAGES);
+  }
+  selectedFiles = combined;
+  fileInput.value = "";
   renderPreviews();
   checkStatus();
-  if (selectedFiles.length) checkStatus();
 }
 
 function renderPreviews() {
@@ -433,10 +435,15 @@ function renderPreviews() {
   });
   html += `</div>
     <div class="preview-actions">
-      <button class="btn-sm" onclick="fileInput.click()">📁 ${selectedFiles.length < MAX_IMAGES ? '添加更多' : '换图片'}</button>
+      <button class="btn-sm" onclick="${selectedFiles.length < MAX_IMAGES ? 'fileInput.click()' : 'replaceAll()'}">📁 ${selectedFiles.length < MAX_IMAGES ? '添加更多' : '换图片'}</button>
       <button class="btn-sm" onclick="clearFiles()">✕ 清除</button>
     </div>`;
   previewArea.innerHTML = html;
+}
+
+function replaceAll() {
+  clearFiles();
+  fileInput.click();
 }
 
 function clearFiles() {
