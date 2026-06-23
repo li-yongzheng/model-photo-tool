@@ -181,6 +181,14 @@
   /* Modal */
 
   /* Responsive */
+  .rating-stars { display: flex; gap: 4px; cursor: pointer; }
+  .rating-stars .star { font-size: 28px; color: #ddd; transition: color 0.15s; }
+  .rating-stars .star.active { color: #e0b44c; }
+  .rating-input { display: flex; gap: 8px; margin-top: 8px; }
+  .rating-input textarea { flex: 1; min-height: 48px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; font-family: inherit; background: #faf9f7; }
+  .rating-input textarea:focus { outline: none; border-color: var(--accent); }
+  .feedback-stats { font-size: 13px; color: var(--muted); line-height: 1.8; }
+
   .series-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-top: 12px; }
   .series-item img { width: 100%; border-radius: 8px; display: block; }
   .series-item a { display: block; text-align: center; font-size: 13px; color: var(--accent); margin-top: 4px; text-decoration: none; }
@@ -289,6 +297,31 @@
       <p id="seriesProgress" style="font-size:14px;color:var(--muted);">正在生成系列图...</p>
     </div>
     <div id="seriesGrid" class="series-grid"></div>
+  </div>
+
+  <!-- Rating -->
+  <div id="ratingCard" class="card" style="display:none;">
+    <div class="card-title">⭐ 给这张图打分</div>
+    <div class="rating-stars" id="ratingStars">
+      <span class="star" data-score="1">☆</span>
+      <span class="star" data-score="2">☆</span>
+      <span class="star" data-score="3">☆</span>
+      <span class="star" data-score="4">☆</span>
+      <span class="star" data-score="5">☆</span>
+    </div>
+    <div class="rating-input">
+      <textarea id="ratingComment" placeholder="哪里好、哪里不好？（可选）比如：颜色偏黄、裤长不够、质感很好..."></textarea>
+    </div>
+    <button id="btnSubmitRating" class="btn-outline" style="margin-top:8px;width:100%;">提交评分</button>
+    <p id="ratingThanks" style="display:none; text-align:center; color:var(--success); font-size:14px; margin-top:8px;">感谢打分！</p>
+  </div>
+
+  <!-- Feedback Stats -->
+  <div class="card" style="margin-top:16px;">
+    <div class="card-title collapsible" id="statsToggle">📊 评分统计</div>
+    <div id="statsContent" class="collapsible-content">
+      <div class="feedback-stats" id="feedbackStats">加载中...</div>
+    </div>
   </div>
 
   <!-- Error -->
@@ -521,6 +554,7 @@ async function generate() {
       $("#resultCard").style.display = "";
       $("#seriesCard").style.display = "none";
       $("#seriesGrid").innerHTML = "";
+      showRatingCard(data.savedFile || "");
       $("#resultCard").scrollIntoView({ behavior: "smooth" });
     }
 
@@ -629,6 +663,86 @@ async function generateSeries() {
     $("#btnSeries").disabled = false;
   }
 }
+
+// ── Rating ──
+let ratingScore = 0;
+let ratingImageFile = "";
+
+$$("#ratingStars .star").forEach(star => {
+  star.addEventListener("click", () => {
+    ratingScore = Number(star.dataset.score);
+    $$("#ratingStars .star").forEach((s, i) => {
+      s.textContent = i < ratingScore ? "★" : "☆";
+      s.classList.toggle("active", i < ratingScore);
+    });
+  });
+  star.addEventListener("mouseenter", () => {
+    const s = Number(star.dataset.score);
+    $$("#ratingStars .star").forEach((st, i) => { st.textContent = i < s ? "★" : "☆"; });
+  });
+  star.addEventListener("mouseleave", () => {
+    $$("#ratingStars .star").forEach((st, i) => {
+      st.textContent = i < ratingScore ? "★" : "☆";
+      st.classList.toggle("active", i < ratingScore);
+    });
+  });
+});
+
+$("#btnSubmitRating").addEventListener("click", async () => {
+  if (!ratingScore) { toast("请先点击星星打分", true); return; }
+  const comment = $("#ratingComment").value.trim();
+  try {
+    const res = await fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ score: ratingScore, comment, pose: selectedPose, imageFile: ratingImageFile }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "提交失败");
+    $("#ratingThanks").style.display = "";
+    $("#btnSubmitRating").disabled = true;
+    loadFeedbackStats();
+  } catch (err) {
+    toast(err.message || "提交失败", true);
+  }
+});
+
+function showRatingCard(imageFile) {
+  ratingImageFile = imageFile || "";
+  ratingScore = 0;
+  $("#ratingComment").value = "";
+  $("#ratingThanks").style.display = "none";
+  $("#btnSubmitRating").disabled = false;
+  $$("#ratingStars .star").forEach(s => { s.textContent = "☆"; s.classList.remove("active"); });
+  $("#ratingCard").style.display = "";
+  $("#ratingCard").scrollIntoView({ behavior: "smooth" });
+}
+
+async function loadFeedbackStats() {
+  try {
+    const res = await fetch("/api/feedback-stats");
+    const d = await res.json();
+    let html = `⭐ 平均分 <b>${d.avgScore}</b> / 共 <b>${d.total}</b> 次评价<br>`;
+    const poses = { "quiet-luxury": "高级质感", "walking": "韩系街拍", "studio-clean": "白底棚拍", "detail-forward": "细节特写" };
+    Object.entries(d.poseStats || {}).forEach(([k, v]) => {
+      html += `${poses[k] || k}：均分 ${v.avg}（${v.count}次）<br>`;
+    });
+    if (d.recent?.length) {
+      html += `<br>最近评价：<br>`;
+      d.recent.slice(0, 5).forEach(r => {
+        html += `${"★".repeat(r.score)}${"☆".repeat(5 - r.score)} ${r.comment ? "—— " + r.comment : ""}<br>`;
+      });
+    }
+    $("#feedbackStats").innerHTML = html;
+  } catch { $("#feedbackStats").textContent = "暂无数据"; }
+}
+
+// Stats toggle
+$("#statsToggle").addEventListener("click", () => {
+  $("#statsToggle").classList.toggle("open");
+  $("#statsContent").classList.toggle("open");
+  loadFeedbackStats();
+});
 
 // ── Save Key ──
 $("#btnSaveKey").addEventListener("click", async () => {

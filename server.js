@@ -56,6 +56,16 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/feedback") {
+      await handleFeedback(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/feedback-stats") {
+      await sendFeedbackStats(res);
+      return;
+    }
+
     if (req.method === "GET") {
       const filePath = url.pathname === "/" ? "/index.html" : url.pathname;
       await sendFile(res, path.join(__dirname, "public", safePublicPath(filePath)));
@@ -262,6 +272,77 @@ async function handleGenerateSeries(req, res) {
   }
 
   sendJson(res, { series: results });
+}
+
+// ── Feedback ──
+const FEEDBACK_DIR = path.join(__dirname, "feedback");
+const FEEDBACK_FILE = path.join(FEEDBACK_DIR, "feedback.json");
+
+async function handleFeedback(req, res) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    return sendJson(res, { error: "数据格式错误。" }, 400);
+  }
+
+  const score = Number(payload.score);
+  if (!Number.isFinite(score) || score < 1 || score > 5) {
+    return sendJson(res, { error: "请给出 1-5 星的评分。" }, 400);
+  }
+
+  const comment = String(payload.comment || "").trim().slice(0, 200);
+  const record = {
+    time: new Date().toISOString(),
+    score,
+    comment,
+    pose: payload.pose || "",
+    imageFile: payload.imageFile || "",
+  };
+
+  await mkdir(FEEDBACK_DIR, { recursive: true });
+  let records = [];
+  try {
+    records = JSON.parse(readFileSync(FEEDBACK_FILE, "utf8"));
+  } catch {
+    records = [];
+  }
+  records.push(record);
+  await writeFile(FEEDBACK_FILE, JSON.stringify(records, null, 2));
+
+  sendJson(res, { ok: true, total: records.length });
+}
+
+async function sendFeedbackStats(res) {
+  let records = [];
+  try {
+    records = JSON.parse(readFileSync(FEEDBACK_FILE, "utf8"));
+  } catch {
+    records = [];
+  }
+
+  const total = records.length;
+  const avgScore = total > 0
+    ? (records.reduce((s, r) => s + r.score, 0) / total).toFixed(1)
+    : "0";
+
+  const byPose = {};
+  for (const r of records) {
+    const p = r.pose || "unknown";
+    if (!byPose[p]) byPose[p] = { total: 0, count: 0 };
+    byPose[p].total += r.score;
+    byPose[p].count += 1;
+  }
+  const poseStats = Object.fromEntries(
+    Object.entries(byPose).map(([k, v]) => [k, { avg: (v.total / v.count).toFixed(1), count: v.count }])
+  );
+
+  const recent = records.slice(-10).reverse();
+
+  sendJson(res, { total, avgScore, poseStats, recent });
 }
 
 async function analyzeGarmentImage({ imageDataUrls, notes }) {
