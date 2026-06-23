@@ -167,11 +167,6 @@
   .key-hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
 
   /* Samples */
-  .sample-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
-  .sample-item { cursor: pointer; border-radius: 8px; overflow: hidden; transition: transform 0.15s; }
-  .sample-item:hover { transform: translateY(-2px); }
-  .sample-item img { width: 100%; display: block; aspect-ratio: 2/3; object-fit: cover; }
-  .sample-label { font-size: 12px; color: var(--muted); text-align: center; padding: 6px 0; }
 
   /* Toast */
   .toast {
@@ -184,12 +179,6 @@
   .toast.error { background: var(--danger); }
 
   /* Modal */
-  .modal-overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
-    display: flex; align-items: center; justify-content: center; z-index: 999;
-  }
-  .modal-img { max-width: 90vw; max-height: 85vh; border-radius: 8px; }
-  .modal-close { position: absolute; top: 16px; right: 24px; color: #fff; font-size: 32px; cursor: pointer; }
 
   /* Responsive */
   @media (max-width: 600px) {
@@ -197,7 +186,7 @@
     header h1 { font-size: 24px; }
     .card { padding: 20px 16px; }
     .pose-grid { grid-template-columns: repeat(2, 1fr); }
-    .sample-grid { grid-template-columns: repeat(2, 1fr); }
+
     .key-input-row { flex-direction: column; }
   }
 </style>
@@ -314,24 +303,12 @@
     </div>
   </div>
 
-  <!-- Samples -->
-  <div class="card">
-    <div class="card-title">📸 历史生成示例</div>
-    <div id="sampleGrid" class="sample-grid">
-      <div class="sample-item"><div style="background:#f0ebe4;aspect-ratio:2/3;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;">加载中...</div></div>
-    </div>
-  </div>
 
 </div>
 
 <!-- Toast -->
 <div id="toast" class="toast"></div>
 
-<!-- Image Modal -->
-<div id="imgModal" class="modal-overlay" style="display:none;" onclick="this.style.display='none'">
-  <span class="modal-close">&times;</span>
-  <img id="modalImg" class="modal-img" alt="预览">
-</div>
 
 <script>
 // ── State ──
@@ -570,34 +547,9 @@ $("#keyToggle").addEventListener("click", () => {
   $("#keyContent").classList.toggle("open");
 });
 
-// ── Load samples ──
-async function loadSamples() {
-  try {
-    const res = await fetch("/api/samples");
-    const data = await res.json();
-    if (!data.samples?.length) return;
-    const grid = $("#sampleGrid");
-    grid.innerHTML = data.samples.map((s) => `
-      <div class="sample-item" onclick="openModal('/sample/${encodeURIComponent(s.id)}')">
-        <img src="/sample/${encodeURIComponent(s.id)}" alt="${esc(s.id)}" loading="lazy">
-        <div class="sample-label">${esc(s.id)}</div>
-      </div>
-    `).join("");
-  } catch { /* samples are optional */ }
-}
-
-// ── Image modal ──
-function openModal(src) {
-  $("#modalImg").src = src;
-  $("#imgModal").style.display = "flex";
-}
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") $("#imgModal").style.display = "none";
-});
 
 // ── Init ──
 checkStatus();
-loadSamples();
 </script>
 
 </body>

@@ -24,12 +24,6 @@ const mimeTypes = new Map([
   [".svg", "image/svg+xml; charset=utf-8"],
 ]);
 
-const samples = {
-  "white-hooded": "generated_model_images/white_plush_hooded_jacket_model_20260622.png",
-  "white-vneck": "generated_model_images/white_plush_vneck_jacket_model_20260622.png",
-  "camel-short": "generated_model_images/camel_plush_short_jacket_model_20260622.png",
-  "brown-mink": "output/model-look-brown-mink-quiet-luxury.png",
-};
 
 loadLocalEnv();
 
@@ -47,21 +41,8 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    if (req.method === "GET" && url.pathname === "/api/samples") {
-      return sendJson(res, {
-        samples: Object.entries(samples).map(([id, file]) => ({ id, url: `/sample/${id}`, file })),
-      });
-    }
-
     if (req.method === "POST" && url.pathname === "/api/save-key") {
       await handleSaveKey(req, res);
-      return;
-    }
-
-    if (req.method === "GET" && url.pathname.startsWith("/sample/")) {
-      const id = decodeURIComponent(url.pathname.replace("/sample/", ""));
-      if (!samples[id]) return notFound(res);
-      await sendFile(res, path.join(__dirname, samples[id]));
       return;
     }
 
