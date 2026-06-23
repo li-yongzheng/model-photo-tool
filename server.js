@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 5178);
 const HOST = process.env.HOST || "127.0.0.1";
-const DEFAULT_IMAGE_MODEL = "doubao-seedream-5-0-260128";
+const DEFAULT_IMAGE_MODEL = "doubao-seedream-4-5-251128";
 const DEFAULT_VISION_MODEL = "Qwen/Qwen3-VL-32B-Instruct";
 const SILICONFLOW_BASE = "https://api.siliconflow.cn/v1";
 const ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3/images/generations";
@@ -485,86 +485,60 @@ function buildAnalysisPrompt(notes, imageCount = 1) {
 
 function buildPrompt({ notes, pose, garmentAnalysis, seriesPose }) {
   const sceneMap = {
-    "quiet-luxury": "极简白色画廊空间，大面积留白，暖色大理石地面，柔和侧逆光从落地窗洒入",
-    "walking": "上海武康路法租界街景，梧桐树影斑驳，午后阳光温暖柔和，背景虚化",
-    "studio-clean": "专业摄影棚纯白无影墙，多角度柔光灯箱，干净利落的商业广告片质感",
-    "detail-forward": "设计师买手店室内，暖木色家具，自然光从窗户斜射，景深很浅",
+    "quiet-luxury": "a minimalist white gallery space with floor-to-ceiling windows, warm marble floors, soft side lighting streaming through the glass creating gentle gradients on the wall",
+    "walking": "a tree-lined street in an affluent neighborhood, dappled afternoon sunlight filtering through plane tree leaves, blurred luxury boutiques in the background",
+    "studio-clean": "a professional photography studio with a seamless white cyclorama wall, multiple softbox lights creating even, shadowless illumination, clean commercial aesthetic",
+    "detail-forward": "a curated designer boutique interior with warm oak shelving and natural light slanting through a side window, shallow depth of field blurring the background",
   };
 
-  const poseLine = seriesPose
-    ? `竖版全身，${seriesPose}服装、场景、光影、人物与首张完全一致。`
+  const poseDesc = seriesPose
+    ? `a full-body vertical shot, ${seriesPose} The outfit, setting, lighting, and model appearance must be identical to the first image.`
     : {
     "quiet-luxury":
-      `竖版全身，模特姿态松弛自信，重心放在后腿，一只手自然垂放。画面必须包含从头到脚完整全身，头身比1:7.5。场景：${sceneMap["quiet-luxury"]}。`,
+      `a relaxed full-body shot of the model standing with her weight shifted to the back leg, one hand resting naturally at her side, head-to-toe framing with generous negative space above and to the right. The setting is ${sceneMap["quiet-luxury"]}`,
     "walking":
-      `竖版全身，模特在街上自然行走，步伐轻盈放松，一只手插口袋，抓拍感。画面必须包含从头到脚完整全身，腿长明显。场景：${sceneMap["walking"]}。`,
+      `a candid full-body shot of the model walking naturally down the street, one hand tucked casually in her pocket, mid-stride with a relaxed expression, head-to-toe framing. The setting is ${sceneMap["walking"]}`,
     "studio-clean":
-      `竖版全身，模特正对镜头站立，双手自然垂放，展示服装完整廓形。画面必须包含从头到脚完整全身，肩宽头小。场景：${sceneMap["studio-clean"]}。`,
+      `a clean full-body shot of the model standing centered and facing the camera, both hands relaxed at her sides, showcasing the complete silhouette, head-to-toe framing. The setting is ${sceneMap["studio-clean"]}`,
     "detail-forward":
-      `竖版大半身，重点展示领口、袖口、口袋和门襟的做工细节。注意肩宽比例，不要大头窄肩。场景：${sceneMap["detail-forward"]}。`,
-  }[pose] || "竖版全身，高级电商模特感。";
+      `a three-quarter body shot focusing on the collar, cuffs, pockets, and button placket of the garment, the model's hands naturally positioned away from key details. The setting is ${sceneMap["detail-forward"]}`,
+  }[pose] || "a full-body vertical editorial fashion shot with premium e-commerce quality.";
 
   const userNotes = notes
-    ? `用户额外备注：${notes}`
-    : "用户无额外备注；以上传图片自动解析结果为准。";
+    ? `Additional user notes: ${notes}`
+    : "";
 
   const preserveList = Array.isArray(garmentAnalysis.detailsToPreserve)
-    ? garmentAnalysis.detailsToPreserve.map((item) => "`- ${item}`").join("\n")
-    : "- 按上传图保留真实款式细节";
+    ? garmentAnalysis.detailsToPreserve.map((item) => `- ${item}`).join("\n")
+    : "- Preserve all visible details from the reference image";
 
   return [
-    "你是一位顶级时尚摄影师，正在为高端设计师品牌拍摄2026秋冬系列画册。上传图片中的主商品服装是唯一款式依据，请精确还原所有细节。",
+    "A high-end fashion editorial photograph for a luxury designer brand's 2026 fall-winter lookbook, shot on a Hasselblad H6D medium format camera with an 85mm f/1.4 portrait lens at wide aperture. The extremely shallow depth of field creates a creamy, painterly bokeh that melts the background away while keeping the garment in razor-sharp focus. Natural side lighting at approximately 45 degrees casts soft sculptural shadows across the fabric, revealing every nuance of surface texture. The color grading follows a warm neutral Kodak Portra 400 film profile — muted earth tones, delicate highlight rolloff, open shadows with visible detail, and a subtle golden undertone throughout. No harsh contrast, no crushed blacks, no overexposed whites.",
     "",
-    "摄影风格：",
-    "Hasselblad中画幅，85mm f/1.4大光圈，浅景深奶油般虚化背景，画面通透有呼吸感。色调偏暖中性，低饱和莫兰迪色系，暗部有细节不压死黑，高光柔和不过曝。",
+    "The model is a 25-year-old Chinese woman, 170cm tall, with luminous fair skin that shows natural texture — fine pores, subtle highlights on the cheekbones. Her makeup is minimal: feathered natural brows, a nude lip, and a whisper of warm blush. Her dark brown hair falls in soft, lived-in waves just past the shoulders, with visible shine and healthy flyaways catching the light. She has an elegant, slightly aloof expression — relaxed, not smiling, completely at ease. Her build is lean with visible collarbones. Body proportions are critical: 1:7.5 head-to-body ratio with a small, well-defined head, shoulders approximately 2.5x head width with a clean horizontal line, high waist at the 0.618 golden ratio point, legs measuring more than 0.6 of total height.",
     "",
-    "模特形象：",
-    "中国女孩，25岁，身高170cm，皮肤白皙细腻有光泽。自然韩式裸妆，野生眉，裸色唇。深棕色中长发蓬松微卷，发质健康有光泽。气质清冷高级，身材匀称偏瘦，锁骨明显。",
+    "The uploaded garment is the only style reference and must be reproduced with absolute fidelity. Every construction detail — collar shape, shoulder line, sleeve type and length, cuff opening, pocket placement and angle, button placket or zipper configuration, hem length and curvature — must match the reference image exactly. Do not add pockets, belts, drawstrings, buttons, logos, or any trim that is not present in the uploaded image. If a detail is not clearly visible, keep it simple and understated.",
     "",
-    "人体比例（极其重要，必须严格遵守）：",
-    "头身比1:7.5，头围偏小，脸小且轮廓清晰。肩膀宽度约为头宽的2.5倍，肩线平直宽阔。腰线偏高，肚脐位于身高的0.618黄金分割点。腿长从髋骨到脚底占身高的0.6以上，大腿和小腿比例均衡。脚踝纤细。整体呈标准的8头身时尚插画比例。",
+    "The outfit formula follows Old Money quiet luxury principles:",
+    `Upper body: The main garment from the uploaded image — ${garmentAnalysis.productParagraph}. Color: ${garmentAnalysis.color}. Material: ${garmentAnalysis.material}. Silhouette: ${garmentAnalysis.silhouette}. Length: ${garmentAnalysis.length}. Shoulder: ${garmentAnalysis.shoulder}. Collar: ${garmentAnalysis.collar}. Sleeves: ${garmentAnalysis.sleeves}. Cuffs: ${garmentAnalysis.cuffs}. Pockets: ${garmentAnalysis.pockets}. Closure: ${garmentAnalysis.closure}. Hem: ${garmentAnalysis.hem}.`,
+    "Inner layer (if the main garment is a jacket or coat): A fine-gauge cashmere turtleneck or a heavyweight silk charmeuse blouse in a contrasting neutral tone. Dark inner for light outer garments, cream or ivory inner for dark outer garments. The fabric should show subtle natural luster — not shiny, but visibly rich.",
+    "Lower body: Black high-waisted wide-leg tailored trousers in a wool-blend fabric with exceptional drape and a sharp center crease. The hem breaks softly over the shoe without pooling. The silhouette is elongated and statuesque.",
+    "Footwear: Black pointed-toe ankle boots or black pointed-toe pumps in fine matte leather. No patent shine.",
+    "Accessories: Black sunglasses — worn either on the eyes, pushed up into the hair as a headband, or hooked onto the neckline as a styling detail. A whisper-thin gold bangle or silver watch at the wrist. Maximum three accessories total.",
+    "Fabrics throughout must be natural and luxurious: cashmere, merino wool, silk, high-count cotton poplin, matte suede. Different textures should layer against each other — soft fuzz against smooth weave, matte against subtle sheen — to create visual depth without pattern or print.",
     "",
-    "搭配方案（老钱风核心公式，必须严格遵守）：",
-    "上装：上传图片中的主商品服装，精确还原版型和细节。",
-    "色彩法则：全身不超过3种颜色。优先同色系深浅叠穿——奶油白+燕麦米+驼色，或藏青+浅灰+炭灰。只在对比较弱时用黑或白做内搭打破沉闷。",
-    "内搭款式（如果主商品是外套）：极细羊绒半高领打底衫、重磅真丝衬衫、或牛津纺白衬衫。领口干净利落，面料有高级哑光光泽。",
-    "下装：黑色高腰阔腿长裤，垂坠感极强，裤腿很长覆盖到鞋面。面料为羊毛混纺，裤线锋利。",
-    "鞋子：黑色尖头细跟短靴或黑色尖头高跟鞋，皮质细腻。",
-    "配饰：黑色墨镜（可佩戴、推上头顶、或别在胸前衣襟上）、腕间极细金镯或银色手表。不超过3件配饰。",
-    "面料要求：天然材质为主——羊绒、羊毛、真丝、高支棉、哑光麂皮。不同肌理叠穿创造层次。",
+    "The overall palette is restrained and tonal: cream, oatmeal, camel, charcoal, navy, chocolate brown. No more than three colors in the entire frame. Black is used only as an anchor in shoes, trousers, or accessories — never head-to-toe.",
     "",
-    "服装细节（根据上传图片自动解析）：",
-    garmentAnalysis.productParagraph,
-    `颜色：${garmentAnalysis.color}`,
-    `材质：${garmentAnalysis.material}`,
-    `廓形：${garmentAnalysis.silhouette}`,
-    `衣长：${garmentAnalysis.length}`,
-    `肩线：${garmentAnalysis.shoulder}`,
-    `领子/帽子：${garmentAnalysis.collar}`,
-    `袖子：${garmentAnalysis.sleeves}`,
-    `袖口：${garmentAnalysis.cuffs}`,
-    `口袋：${garmentAnalysis.pockets}`,
-    `门襟：${garmentAnalysis.closure}`,
-    `下摆：${garmentAnalysis.hem}`,
+    "Composition: " + poseDesc + " The model must be shown from head to toe with her feet and shoes fully visible, not cropped. The proportions should read tall and elegant with the legs occupying the lower 0.6 of the frame. Leave breathing room above the head and to the sides for text overlay in e-commerce use.",
     "",
-    "画面构成：",
-    poseLine,
-    "",
-    "款式锁定规则：",
-    "- 领型、袖型、肩线、袖口、口袋、门襟、下摆必须与上传图完全一致，不得自行修改或重新设计。",
-    "- 不要凭空添加口袋、腰带、抽绳、纽扣、拉链、logo或任何装饰。",
-    "- 看不清的细节保持简洁，不要脑补。",
-    "",
-    "本次必须保留的细节：",
+    "Details that must be preserved in this generation:",
     preserveList,
     "",
-    "硬性要求：",
-    "超高分辨率、面料肌理清晰可见、真实穿着比例、无文字水印品牌标志、无畸形手指。",
+    "Technical requirements: ultra-high resolution, fabric texture rendered with tactile clarity and visible weave/knit structure where applicable, natural skin texture without plastic smoothing, realistic garment drape and fold behavior, no watermarks, no brand logos, no text, no distorted hands or fingers.",
     "",
     userNotes,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
-
 function parseJsonObject(text) {
   if (!text) throw new Error("自动分析没有返回文字。");
   const cleaned = text.replace(/```json|```/g, "").trim();
