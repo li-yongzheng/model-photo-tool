@@ -4,9 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "sharp": "0.35.3"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.9.0"
   }
 }

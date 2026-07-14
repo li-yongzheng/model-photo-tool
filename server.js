@@ -1,16 +1,31 @@
 import { createReadStream, readFileSync } from "node:fs";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { detectImageMime, normalizeUploadedImage } from "./image-normalizer.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.PORT || 5178);
+loadLocalEnv();
+
+const configuredPort = Number(process.env.PORT || 5178);
+const PORT = Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65535
+  ? configuredPort
+  : 5178;
 const HOST = process.env.HOST || "127.0.0.1";
 const DEFAULT_IMAGE_MODEL = "doubao-seedream-4-5-251128";
 const DEFAULT_VISION_MODEL = "Qwen/Qwen3-VL-32B-Instruct";
 const SILICONFLOW_BASE = "https://api.siliconflow.cn/v1";
 const ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3/images/generations";
+// Keep aggregate limits large enough for every individually permitted image.
+// Base64 expands a generated image by roughly one third in the series JSON request.
+const MAX_MULTIPART_BYTES = 40 * 1024 * 1024;
+const MAX_JSON_BYTES = 60 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+const MAX_GENERATED_IMAGE_BYTES = 40 * 1024 * 1024;
+const UPSTREAM_TIMEOUT_MS = 120_000;
+const VALID_POSES = new Set(["quiet-luxury", "walking", "studio-clean", "detail-forward"]);
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -24,13 +39,15 @@ const mimeTypes = new Map([
   [".webp", "image/webp"],
   [".svg", "image/svg+xml; charset=utf-8"],
 ]);
+const server = http.createServer(requestHandler);
 
-
-loadLocalEnv();
-
-const server = http.createServer(async (req, res) => {
+async function requestHandler(req, res) {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+
+    if (req.method === "POST" && !isSameOriginRequest(req)) {
+      return sendJson(res, { error: "已拒绝来自其他网站的请求。" }, 403);
+    }
 
     if (req.method === "GET" && url.pathname === "/api/status") {
       return sendJson(res, {
@@ -80,7 +97,7 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, { error: safeError(error) }, 500);
     }
   }
-});
+}
 
 server.on("error", (error) => {
   if (error.code === "EADDRINUSE") {
@@ -92,9 +109,11 @@ server.on("error", (error) => {
   process.exitCode = 1;
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`模特图工具已启动：http://${HOST}:${PORT}`);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  server.listen(PORT, HOST, () => {
+    console.log(`模特图工具已启动：http://${HOST}:${PORT}`);
+  });
+}
 
 async function handleGenerate(req, res) {
   const analysisKey = process.env.SILICONFLOW_API_KEY;
@@ -112,14 +131,12 @@ async function handleGenerate(req, res) {
     );
   }
 
-  const incoming = new Request(`http://localhost:${PORT}/api/generate`, {
-    method: "POST",
-    headers: req.headers,
-    body: req,
-    duplex: "half",
-  });
-
-  const form = await incoming.formData();
+  let form;
+  try {
+    form = await parseFormData(req, MAX_MULTIPART_BYTES);
+  } catch (error) {
+    return sendJson(res, { error: requestErrorMessage(error, "上传数据格式不正确。") }, error?.status || 400);
+  }
 
   // Collect up to 3 garment images
   const imageFields = ["garment", "garment2", "garment3"];
@@ -128,15 +145,28 @@ async function handleGenerate(req, res) {
     const img = form.get(field);
     if (!img || typeof img === "string") continue;
     const bytes = Buffer.from(await img.arrayBuffer());
-    const mime = (img.type && img.type.startsWith("image/")) ? img.type : "image/jpeg";
-    imageDataUrls.push(`data:${mime};base64,${bytes.toString("base64")}`);
+    if (bytes.length > MAX_IMAGE_BYTES) {
+      return sendJson(res, { error: `每张图片不能超过 ${MAX_IMAGE_BYTES / 1024 / 1024}MB。` }, 413);
+    }
+    let normalized;
+    try {
+      normalized = await normalizeUploadedImage(bytes, { maxOutputBytes: MAX_IMAGE_BYTES });
+    } catch (error) {
+      const name = typeof img.name === "string" && img.name ? `“${img.name}”` : "图片";
+      return sendJson(
+        res,
+        { error: `${name}${requestErrorMessage(error, "无法读取，请重新导出后重试。")}` },
+        error?.status || 400,
+      );
+    }
+    imageDataUrls.push(`data:${normalized.mime};base64,${normalized.bytes.toString("base64")}`);
   }
   if (!imageDataUrls.length) {
     return sendJson(res, { error: "请至少选择一张衣服图片。" }, 400);
   }
 
   const mainImage = imageDataUrls[0];
-  const notes = String(form.get("notes") || "").trim();
+  const notes = String(form.get("notes") || "").trim().slice(0, 1000);
   const garmentAnalysis = await analyzeGarmentImage({
     imageDataUrls,
     notes,
@@ -157,7 +187,7 @@ async function handleGenerate(req, res) {
     watermark: false,
   };
 
-  const response = await fetch(ARK_BASE, {
+  const response = await fetchWithTimeout(ARK_BASE, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${imageKey}`,
@@ -177,13 +207,24 @@ async function handleGenerate(req, res) {
     return sendJson(res, { error: "生成完成但没有收到图片，请再试一次。" }, 502);
   }
 
+  let imageBytes;
+  let imageMime;
+  try {
+    imageBytes = decodeBase64Image(firstImage, MAX_GENERATED_IMAGE_BYTES);
+    imageMime = detectImageMime(imageBytes);
+    if (!imageMime) throw new Error("生图服务返回的内容不是支持的图片格式。");
+  } catch (error) {
+    return sendJson(res, { error: requestErrorMessage(error, "生图服务返回了无效图片。") }, 502);
+  }
+
   await mkdir(path.join(__dirname, "agent_outputs"), { recursive: true });
-  const fileName = `model_photo_${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+  const extension = imageMime === "image/jpeg" ? "jpg" : imageMime.split("/")[1];
+  const fileName = `model_photo_${fileTimestamp()}_${randomUUID().slice(0, 8)}.${extension}`;
   const savedPath = path.join(__dirname, "agent_outputs", fileName);
-  await writeFile(savedPath, Buffer.from(firstImage, "base64"));
+  await writeFile(savedPath, imageBytes);
 
   sendJson(res, {
-    image: `data:image/png;base64,${firstImage}`,
+    image: `data:${imageMime};base64,${firstImage}`,
     savedFile: `agent_outputs/${fileName}`,
     analysis: garmentAnalysis,
   });
@@ -195,24 +236,27 @@ async function handleGenerateSeries(req, res) {
     return sendJson(res, { error: "缺少火山引擎 API Key。" }, 400);
   }
 
-  const incoming = new Request(`http://localhost:${PORT}/api/generate-series`, {
-    method: "POST",
-    headers: req.headers,
-    body: req,
-    duplex: "half",
-  });
-
   let payload;
   try {
-    payload = await incoming.json();
-  } catch {
-    return sendJson(res, { error: "请传入生成参数。" }, 400);
+    payload = await readJsonBody(req, MAX_JSON_BYTES);
+  } catch (error) {
+    return sendJson(res, { error: requestErrorMessage(error, "请传入生成参数。") }, error?.status || 400);
   }
 
-  const { mainImage, garmentAnalysis, notes, pose } = payload;
-  if (!mainImage || !garmentAnalysis) {
+  const { mainImage, garmentAnalysis, notes, pose } = payload || {};
+  if (!garmentAnalysis || typeof garmentAnalysis !== "object" || Array.isArray(garmentAnalysis)) {
     return sendJson(res, { error: "缺少主图或分析结果。" }, 400);
   }
+  try {
+    validateDataImage(mainImage, MAX_GENERATED_IMAGE_BYTES);
+  } catch {
+    return sendJson(res, { error: "主图不是有效的 JPG、PNG 或 WEBP 图片。" }, 400);
+  }
+  const normalizedAnalysis = normalizeGarmentAnalysis(garmentAnalysis);
+  const normalizedNotes = typeof notes === "string" ? notes.trim().slice(0, 1000) : "";
+  const normalizedPose = VALID_POSES.has(pose) ? pose : "quiet-luxury";
+
+  await mkdir(path.join(__dirname, "agent_outputs"), { recursive: true });
 
   // 4 series pose variants — different actions, same outfit + background
   const seriesPoses = [
@@ -225,14 +269,14 @@ async function handleGenerateSeries(req, res) {
   const results = [];
   for (let i = 0; i < seriesPoses.length; i++) {
     const seriesPrompt = buildPrompt({
-      notes: notes || "",
-      pose: pose || "quiet-luxury",
-      garmentAnalysis,
+      notes: normalizedNotes,
+      pose: normalizedPose,
+      garmentAnalysis: normalizedAnalysis,
       seriesPose: seriesPoses[i],
     });
 
     try {
-      const response = await fetch(ARK_BASE, {
+      const response = await fetchWithTimeout(ARK_BASE, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${imageKey}`,
@@ -257,11 +301,15 @@ async function handleGenerateSeries(req, res) {
 
       const img = data.data?.[0]?.b64_json;
       if (img) {
-        const fileName = `model_series_${i + 1}_${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+        const imageBytes = decodeBase64Image(img, MAX_GENERATED_IMAGE_BYTES);
+        const imageMime = detectImageMime(imageBytes);
+        if (!imageMime) throw new Error("生图服务返回的内容不是支持的图片格式。");
+        const extension = imageMime === "image/jpeg" ? "jpg" : imageMime.split("/")[1];
+        const fileName = `model_series_${i + 1}_${fileTimestamp()}_${randomUUID().slice(0, 8)}.${extension}`;
         const savedPath = path.join(__dirname, "agent_outputs", fileName);
-        await writeFile(savedPath, Buffer.from(img, "base64"));
+        await writeFile(savedPath, imageBytes);
         results.push({
-          image: `data:image/png;base64,${img}`,
+          image: `data:${imageMime};base64,${img}`,
           savedFile: `agent_outputs/${fileName}`,
         });
       } else {
@@ -278,20 +326,18 @@ async function handleGenerateSeries(req, res) {
 // ── Feedback ──
 const FEEDBACK_DIR = path.join(__dirname, "feedback");
 const FEEDBACK_FILE = path.join(FEEDBACK_DIR, "feedback.json");
+let feedbackWriteQueue = Promise.resolve();
 
 async function handleFeedback(req, res) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-
   let payload;
   try {
-    payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    return sendJson(res, { error: "数据格式错误。" }, 400);
+    payload = await readJsonBody(req, 16 * 1024);
+  } catch (error) {
+    return sendJson(res, { error: requestErrorMessage(error, "数据格式错误。") }, error?.status || 400);
   }
 
-  const score = Number(payload.score);
-  if (!Number.isFinite(score) || score < 1 || score > 5) {
+  const score = Number(payload?.score);
+  if (!Number.isInteger(score) || score < 1 || score > 5) {
     return sendJson(res, { error: "请给出 1-5 星的评分。" }, 400);
   }
 
@@ -300,37 +346,32 @@ async function handleFeedback(req, res) {
     time: new Date().toISOString(),
     score,
     comment,
-    pose: payload.pose || "",
-    imageFile: payload.imageFile || "",
+    pose: VALID_POSES.has(payload.pose) ? payload.pose : "",
+    imageFile: String(payload.imageFile || "").slice(0, 200),
   };
 
-  await mkdir(FEEDBACK_DIR, { recursive: true });
-  let records = [];
-  try {
-    records = JSON.parse(readFileSync(FEEDBACK_FILE, "utf8"));
-  } catch {
-    records = [];
-  }
-  records.push(record);
-  await writeFile(FEEDBACK_FILE, JSON.stringify(records, null, 2));
+  let total;
+  feedbackWriteQueue = feedbackWriteQueue.catch(() => {}).then(async () => {
+    await mkdir(FEEDBACK_DIR, { recursive: true });
+    const records = readFeedbackRecords({ throwOnInvalid: true });
+    records.push(record);
+    await atomicWriteFile(FEEDBACK_FILE, JSON.stringify(records, null, 2));
+    total = records.length;
+  });
+  await feedbackWriteQueue;
 
-  sendJson(res, { ok: true, total: records.length });
+  sendJson(res, { ok: true, total });
 }
 
 async function sendFeedbackStats(res) {
-  let records = [];
-  try {
-    records = JSON.parse(readFileSync(FEEDBACK_FILE, "utf8"));
-  } catch {
-    records = [];
-  }
+  const records = readFeedbackRecords();
 
   const total = records.length;
   const avgScore = total > 0
     ? (records.reduce((s, r) => s + r.score, 0) / total).toFixed(1)
     : "0";
 
-  const byPose = {};
+  const byPose = Object.create(null);
   for (const r of records) {
     const p = r.pose || "unknown";
     if (!byPose[p]) byPose[p] = { total: 0, count: 0 };
@@ -364,7 +405,7 @@ async function analyzeGarmentImage({ imageDataUrls, notes }) {
   const analysisPrompt = buildAnalysisPrompt(notes, imageCount);
   userContent.push({ type: "text", text: analysisPrompt });
 
-  const response = await fetch(`${SILICONFLOW_BASE}/chat/completions`, {
+  const response = await fetchWithTimeout(`${SILICONFLOW_BASE}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -399,20 +440,20 @@ async function analyzeGarmentImage({ imageDataUrls, notes }) {
 }
 
 async function handleSaveKey(req, res) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-
   let payload = {};
   try {
-    payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    return sendJson(res, { error: "密钥格式没有保存成功。" }, 400);
+    payload = await readJsonBody(req, 16 * 1024);
+  } catch (error) {
+    return sendJson(res, { error: requestErrorMessage(error, "密钥格式没有保存成功。") }, error?.status || 400);
   }
 
   const siliconflowKey = String(payload.siliconflowKey || "").trim();
   const arkKey = String(payload.arkKey || "").trim();
   if (!siliconflowKey && !arkKey) {
     return sendJson(res, { error: "请至少填入一个 API Key。" }, 400);
+  }
+  if (![siliconflowKey, arkKey].every(isValidEnvValue)) {
+    return sendJson(res, { error: "API Key 不能包含换行符，且长度不能超过 4096 个字符。" }, 400);
   }
 
   const target = path.join(__dirname, ".env.local");
@@ -423,26 +464,15 @@ async function handleSaveKey(req, res) {
     lines = [];
   }
 
-  // Only rewrite key-related lines, leave everything else untouched
-  const out = [];
-  for (const line of lines) {
-    const t = line.trim();
-    if (!t || t.startsWith("SILICONFLOW_API_KEY=") || t.startsWith("ARK_API_KEY=")) continue;
-    out.push(t);
-  }
+  const replacements = new Map();
+  if (siliconflowKey) replacements.set("SILICONFLOW_API_KEY", siliconflowKey);
+  if (arkKey) replacements.set("ARK_API_KEY", arkKey);
+  const nextContent = updateEnvContent(lines, replacements);
+  await atomicWriteFile(target, nextContent, { mode: 0o600 });
+  await chmod(target, 0o600);
 
-  if (siliconflowKey) {
-    process.env.SILICONFLOW_API_KEY = siliconflowKey;
-    out.push(`SILICONFLOW_API_KEY=${siliconflowKey}`);
-  }
-  if (arkKey) {
-    process.env.ARK_API_KEY = arkKey;
-    out.push(`ARK_API_KEY=${arkKey}`);
-  }
-  out.push("");
-
-  const nextContent = out.join("\n");
-  await writeFile(target, nextContent, { mode: 0o600 });
+  if (siliconflowKey) process.env.SILICONFLOW_API_KEY = siliconflowKey;
+  if (arkKey) process.env.ARK_API_KEY = arkKey;
 
   sendJson(res, { ok: true, savedTo: ".env.local" });
 }
@@ -552,11 +582,14 @@ function parseJsonObject(text) {
 function normalizeGarmentAnalysis(raw) {
   const text = (key, fallback = "未明显可见") => {
     const value = raw?.[key];
-    return typeof value === "string" && value.trim() ? value.trim() : fallback;
+    return typeof value === "string" && value.trim() ? value.trim().slice(0, 2000) : fallback;
   };
 
   const details = Array.isArray(raw?.detailsToPreserve)
-    ? raw.detailsToPreserve.filter((item) => typeof item === "string" && item.trim()).slice(0, 10)
+    ? raw.detailsToPreserve
+      .filter((item) => typeof item === "string" && item.trim())
+      .map((item) => item.trim().slice(0, 500))
+      .slice(0, 10)
     : [];
 
   return {
@@ -575,6 +608,30 @@ function normalizeGarmentAnalysis(raw) {
     hem: text("hem"),
     detailsToPreserve: details.length ? details : ["领子、袖口、口袋、门襟和下摆按上传图保持"],
   };
+}
+
+function updateEnvContent(lines, replacements) {
+  const pending = new Map(replacements);
+  const out = [];
+  for (const line of lines) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    const key = match?.[1];
+    if (!key || !replacements.has(key)) {
+      out.push(line);
+      continue;
+    }
+    if (pending.has(key)) {
+      out.push(`${key}=${pending.get(key)}`);
+      pending.delete(key);
+    }
+  }
+  for (const [key, value] of pending) out.push(`${key}=${value}`);
+  while (out.length && out.at(-1) === "") out.pop();
+  return `${out.join("\n")}\n`;
+}
+
+function isValidEnvValue(value) {
+  return value.length <= 4096 && !/[\r\n]/.test(value);
 }
 
 function loadLocalEnv() {
@@ -607,24 +664,39 @@ function safePublicPath(filePath) {
 
 async function sendFile(res, filePath) {
   const resolved = path.resolve(filePath);
-  const publicRoot = path.resolve(__dirname, "public");
-  const sampleRoot = path.resolve(__dirname);
-  if (!resolved.startsWith(publicRoot) && !resolved.startsWith(sampleRoot)) return notFound(res);
+  const publicPath = path.resolve(__dirname, "public");
+  if (resolved !== publicPath && !resolved.startsWith(`${publicPath}${path.sep}`)) return notFound(res);
+  const publicRoot = await realpath(publicPath);
 
+  let realFile;
   try {
-    const fileStat = await stat(resolved);
+    realFile = await realpath(resolved);
+    if (realFile !== publicRoot && !realFile.startsWith(`${publicRoot}${path.sep}`)) return notFound(res);
+    const fileStat = await stat(realFile);
     if (!fileStat.isFile()) return notFound(res);
   } catch {
     return notFound(res);
   }
 
-  const ext = path.extname(resolved).toLowerCase();
-  res.writeHead(200, { "Content-Type": mimeTypes.get(ext) || "application/octet-stream" });
-  createReadStream(resolved).pipe(res);
+  const ext = path.extname(realFile).toLowerCase();
+  res.writeHead(200, {
+    "Content-Type": mimeTypes.get(ext) || "application/octet-stream",
+    "X-Content-Type-Options": "nosniff",
+  });
+  const stream = createReadStream(realFile);
+  stream.on("error", (error) => {
+    console.error(error);
+    if (!res.writableEnded) res.destroy(error);
+  });
+  stream.pipe(res);
 }
 
 function sendJson(res, payload, status = 200) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  });
   res.end(JSON.stringify(payload));
 }
 
@@ -636,5 +708,151 @@ function safeError(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function readFeedbackRecords({ throwOnInvalid = false } = {}) {
+  try {
+    const parsed = JSON.parse(readFileSync(FEEDBACK_FILE, "utf8"));
+    if (!Array.isArray(parsed)) throw new Error("评分数据不是数组。");
+    return parsed
+      .filter((record) => record && Number.isInteger(record.score) && record.score >= 1 && record.score <= 5)
+      .map((record) => ({
+        time: typeof record.time === "string" ? record.time.slice(0, 100) : "",
+        score: record.score,
+        comment: typeof record.comment === "string" ? record.comment.slice(0, 200) : "",
+        pose: VALID_POSES.has(record.pose) ? record.pose : "",
+        imageFile: typeof record.imageFile === "string" ? record.imageFile.slice(0, 200) : "",
+      }));
+  } catch (error) {
+    if (error?.code !== "ENOENT" && throwOnInvalid) {
+      throw new Error("评分文件损坏，已停止写入以避免覆盖原数据。", { cause: error });
+    }
+    return [];
+  }
+}
 
+async function readRequestBody(req, maxBytes) {
+  const declaredLength = Number(req.headers["content-length"]);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw httpError(413, "请求内容过大。");
+  }
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > maxBytes) throw httpError(413, "请求内容过大。");
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, total);
+}
 
+async function readJsonBody(req, maxBytes) {
+  const contentType = String(req.headers["content-type"] || "").split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") throw httpError(415, "请使用 JSON 格式提交数据。");
+  const bytes = await readRequestBody(req, maxBytes);
+  try {
+    return JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw httpError(400, "JSON 数据格式错误。");
+  }
+}
+
+async function parseFormData(req, maxBytes) {
+  const contentType = String(req.headers["content-type"] || "");
+  if (!contentType.toLowerCase().startsWith("multipart/form-data;")) {
+    throw httpError(400, "请使用表单上传图片。");
+  }
+  const bytes = await readRequestBody(req, maxBytes);
+  const incoming = new Request(`http://localhost:${PORT}/`, {
+    method: "POST",
+    headers: { "content-type": contentType },
+    body: bytes,
+  });
+  return incoming.formData();
+}
+
+function isSupportedDataImage(value) {
+  return typeof value === "string" && /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value);
+}
+
+function validateDataImage(value, maxBytes) {
+  if (!isSupportedDataImage(value)) throw new Error("图片 Data URL 格式无效。");
+  const comma = value.indexOf(",");
+  const declaredMime = value.slice(5, value.indexOf(";", 5));
+  const bytes = decodeBase64Image(value.slice(comma + 1), maxBytes);
+  const detectedMime = detectImageMime(bytes);
+  if (!detectedMime || detectedMime !== declaredMime) throw new Error("图片内容与格式不匹配。");
+  return { bytes, mime: detectedMime };
+}
+
+function decodeBase64Image(value, maxBytes) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 === 1) {
+    throw new Error("图片编码无效。");
+  }
+  const estimatedBytes = Math.floor(value.length * 3 / 4);
+  if (estimatedBytes > maxBytes) throw new Error("返回图片过大。");
+  const bytes = Buffer.from(value, "base64");
+  if (!bytes.length || bytes.length > maxBytes) throw new Error("返回图片无效或过大。");
+  return bytes;
+}
+
+async function fetchWithTimeout(url, options) {
+  try {
+    return await fetch(url, { ...options, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
+  } catch (error) {
+    if (error?.name === "TimeoutError") throw new Error("外部服务响应超时，请稍后重试。");
+    throw new Error("无法连接外部服务，请检查网络后重试。", { cause: error });
+  }
+}
+
+function httpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function requestErrorMessage(error, fallback) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function fileTimestamp() {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function isSameOriginRequest(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    const parsed = new URL(origin);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.host === req.headers.host;
+  } catch {
+    return false;
+  }
+}
+
+async function atomicWriteFile(target, content, options = {}) {
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, content, options);
+    await rename(temporary, target);
+  } catch (error) {
+    try {
+      await unlink(temporary);
+    } catch {}
+    throw error;
+  }
+}
+
+export {
+  buildAnalysisPrompt,
+  buildPrompt,
+  decodeBase64Image,
+  detectImageMime,
+  isSupportedDataImage,
+  isSameOriginRequest,
+  normalizeGarmentAnalysis,
+  parseJsonObject,
+  requestHandler,
+  safePublicPath,
+  server,
+  updateEnvContent,
+  validateDataImage,
+};

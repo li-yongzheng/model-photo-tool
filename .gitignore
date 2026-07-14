@@ -2,3 +2,5 @@
 .DS_Store
 agent_outputs/
 node_modules/
+# User-provided local MPO regression sample
+test.jpeg
